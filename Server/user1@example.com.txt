@@ -1,0 +1,21 @@
+From: user2@example.com
+Message:  Zdarova user1
+-----------------------------------
+From: user2@example.com
+Message:  Hey
+-----------------------------------
+From: user2@example.com
+Message:  lets walk
+-----------------------------------
+From: user2@example.com
+Message:  user hey
+-----------------------------------
+From: user2@example.com
+Message:  i go home
+-----------------------------------
+From: user2@example.com
+Message:  zdarovaa
+-----------------------------------
+From: user2@example.com
+Message:  heytr
+-----------------------------------

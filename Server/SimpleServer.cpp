@@ -1,34 +1,31 @@
-#include <iostream>
 #include <boost/asio.hpp>
-#include <boost/bind/bind.hpp>
-#include <thread>
+#include <iostream>
+#include <fstream>
+#include <string>
 #include <memory>
-#include <vector>
+#include <sstream>
+#include <map>
 
 using boost::asio::ip::tcp;
-using namespace std::chrono_literals;
 
 const int max_length = 1024;
-std::string server_ip = "127.0.0.1";
-int port = 60000;
-const int timeout_duration = 30 * 60; // Таймаут в секундах (30 минут)
 
-// Класс для обработки одного клиента
 class Session : public std::enable_shared_from_this<Session> {
 public:
-    Session(tcp::socket socket, boost::asio::io_service& io_service)
-        : socket_(std::move(socket)), timer_(io_service) {}
+    Session(tcp::socket socket, std::map<std::string, unsigned short>& clientPorts)
+        : socket_(std::move(socket)), sender_email_(""), clientPorts_(clientPorts) {}
 
     void start() {
-        std::cout << "Client connected: "
-            << socket_.remote_endpoint().address().to_string()
-            << ":" << socket_.remote_endpoint().port() << "\n";
-        start_timer();
+        std::cout << "Client connected from port: " << getPort() << "\n";
         do_read();
     }
 
     tcp::socket& socket() {
         return socket_;
+    }
+
+    unsigned short getPort() const {
+        return socket_.remote_endpoint().port();
     }
 
 private:
@@ -38,115 +35,140 @@ private:
             boost::asio::buffer(data_, max_length),
             [this, self](boost::system::error_code error, std::size_t length) {
                 if (!error) {
-                    // Сбрасываем таймер при получении данных
-                    reset_timer();
+                    std::string received_data(data_, length);
+                    std::cout << "[" << getPort() << "] sent: " << received_data << "\n";
 
-                    // Выводим сообщение и порт клиента
-                    std::cout << "Received message from "
-                        << socket_.remote_endpoint().port() << ": "
-                        << std::string(data_, length) << "\n";
-
-                    do_write(length);
+                    process_client_request(received_data);
+                }
+                else if (error == boost::asio::error::eof) {
+                    std::cout << "Client disconnected from port: " << getPort() << "\n";
                 }
                 else {
-                    handle_disconnect(error);
+                    std::cerr << "Error reading data: " << error.message() << "\n";
                 }
             });
     }
 
-    void do_write(std::size_t length) {
+    void process_client_request(const std::string& request) {
+        std::istringstream iss(request);
+        std::string command;
+        iss >> command;
+
+        if (command == "AUTH") {
+            std::string email, password;
+            iss >> email >> password;
+            if (authenticate_user(email, password)) {
+                sender_email_ = email;
+                clientPorts_[sender_email_] = getPort();
+                send_response("AUTH_SUCCESS\n");
+            }
+            else {
+                send_response("AUTH_FAILED\n");
+            }
+        }
+        else if (command == "MESSAGE") {
+            if (sender_email_.empty()) {
+                send_response("AUTH_REQUIRED\n");
+                return;
+            }
+
+            std::string recipient_email, message;
+            iss >> recipient_email;
+            std::getline(iss, message);
+
+            save_message(sender_email_, recipient_email, message);
+            send_response("MESSAGE_SENT\n");
+        }
+        else {
+            send_response("INVALID_COMMAND\n");
+        }
+
+        do_read();
+    }
+
+    bool authenticate_user(const std::string& email, const std::string& password) {
+        std::ifstream users_file("users.txt");
+        std::string line;
+        while (std::getline(users_file, line)) {
+            size_t pos = line.find(":");
+            if (pos != std::string::npos) {
+                std::string stored_email = line.substr(0, pos);
+                std::string stored_password = line.substr(pos + 1);
+                if (stored_email == email && stored_password == password) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    void save_message(const std::string& sender_email, const std::string& recipient_email, const std::string& message) {
+        std::ofstream out_file(recipient_email + ".txt", std::ios::app);
+        if (out_file.is_open()) {
+            out_file << "From: " << sender_email << "\n";
+            out_file << "Message: " << message << "\n";
+            out_file << "-----------------------------------\n";
+            std::cout << "Message saved for recipient: " << recipient_email << "\n";
+        }
+        else {
+            std::cerr << "Error opening file for writing.\n";
+        }
+    }
+
+    void send_response(const std::string& response) {
         auto self(shared_from_this());
         boost::asio::async_write(
-            socket_, boost::asio::buffer(data_, length),
+            socket_, boost::asio::buffer(response),
             [this, self](boost::system::error_code error, std::size_t /*length*/) {
-                if (!error) {
-                    do_read();
-                }
-                else {
-                    handle_disconnect(error);
+                if (error) {
+                    std::cerr << "Error sending response: " << error.message() << "\n";
                 }
             });
-    }
-
-    void start_timer() {
-        timer_.expires_from_now(std::chrono::seconds(timeout_duration));
-        timer_.async_wait([self = shared_from_this(), this](const boost::system::error_code& error) {
-            if (!error) {
-                std::cerr << "Timeout: Client inactive for 30 minutes. Disconnecting: "
-                    << socket_.remote_endpoint().address().to_string() << ":"
-                    << socket_.remote_endpoint().port() << "\n";
-                socket_.close();
-            }
-            });
-    }
-
-    void reset_timer() {
-        timer_.cancel();
-        start_timer();
-    }
-
-    void handle_disconnect(const boost::system::error_code& error) {
-        std::cerr << "Client disconnected: "
-            << socket_.remote_endpoint().address().to_string() << ":"
-            << socket_.remote_endpoint().port()
-            << " (" << error.message() << ")\n";
-        socket_.close();
     }
 
     tcp::socket socket_;
-    boost::asio::steady_timer timer_; // Таймер для отслеживания таймаута
     char data_[max_length];
+    std::string sender_email_;
+    std::map<std::string, unsigned short>& clientPorts_;
 };
 
-// Класс сервера для обработки новых подключений
 class Server {
 public:
     Server(boost::asio::io_service& io_service, short port)
-        : acceptor_(io_service, tcp::endpoint(tcp::v4(), port)), io_service_(io_service) {
+        : acceptor_(io_service, tcp::endpoint(tcp::v4(), port)), clientPorts_() {
         start_accept();
     }
 
 private:
     void start_accept() {
-        auto new_session = std::make_shared<Session>(tcp::socket(acceptor_.get_executor()), io_service_);
-
-        acceptor_.async_accept(new_session->socket(),
+        auto new_session = std::make_shared<Session>(tcp::socket(acceptor_.get_executor()), clientPorts_);
+        acceptor_.async_accept(
+            new_session->socket(),
             [this, new_session](boost::system::error_code error) {
                 if (!error) {
                     new_session->start();
+                }
+                else {
+                    std::cerr << "Error accepting connection: " << error.message() << "\n";
                 }
                 start_accept();
             });
     }
 
     tcp::acceptor acceptor_;
-    boost::asio::io_service& io_service_;
+    std::map<std::string, unsigned short> clientPorts_;
 };
 
 int main() {
     setlocale(0, "");
     try {
         boost::asio::io_service io_service;
-
-        // Создаем сервер на указанном порту
-        Server server(io_service, port);
-
-        std::cout << "Server is running on port " << port
-            << ". Waiting for clients...\n";
-
-        // Запускаем сервис в несколько потоков
-        std::vector<std::thread> threads;
-        for (int i = 0; i < std::thread::hardware_concurrency(); ++i) {
-            threads.emplace_back([&io_service]() { io_service.run(); });
-        }
-
-        for (auto& t : threads) {
-            t.join();
-        }
+        Server server(io_service, 993);
+        std::cout << "Server is running on port 993...\n";
+        io_service.run();
     }
     catch (std::exception& e) {
         std::cerr << "Exception: " << e.what() << "\n";
     }
-
     return 0;
 }
