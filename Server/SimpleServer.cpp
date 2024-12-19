@@ -3,7 +3,7 @@
 #include <fstream>
 #include <string>
 #include <memory>
-#include <algorithm>
+#include <sstream>
 #include <map>
 
 using boost::asio::ip::tcp;
@@ -15,9 +15,8 @@ public:
     Session(tcp::socket socket, std::map<std::string, unsigned short>& clientPorts)
         : socket_(std::move(socket)), sender_email_(""), clientPorts_(clientPorts) {}
 
-
     void start() {
-        std::cout << "Client connected.\n";
+        std::cout << "Client connected from port: " << getPort() << "\n";
         do_read();
     }
 
@@ -37,10 +36,12 @@ private:
             [this, self](boost::system::error_code error, std::size_t length) {
                 if (!error) {
                     std::string received_data(data_, length);
-                    std::cout << "Received: " << received_data << "\n";
+                    std::cout << "[" << getPort() << "] sent: " << received_data << "\n";
 
-                    // Обрабатываем команды клиента
                     process_client_request(received_data);
+                }
+                else if (error == boost::asio::error::eof) {
+                    std::cout << "Client disconnected from port: " << getPort() << "\n";
                 }
                 else {
                     std::cerr << "Error reading data: " << error.message() << "\n";
@@ -58,7 +59,7 @@ private:
             iss >> email >> password;
             if (authenticate_user(email, password)) {
                 sender_email_ = email;
-                clientPorts_[sender_email_] = getPort(); // Сохраняем порт после успешной аутентификации
+                clientPorts_[sender_email_] = getPort();
                 send_response("AUTH_SUCCESS\n");
             }
             else {
@@ -67,7 +68,6 @@ private:
         }
         else if (command == "MESSAGE") {
             if (sender_email_.empty()) {
-                std::cout << "Sender email is empty, authentication required!\n";
                 send_response("AUTH_REQUIRED\n");
                 return;
             }
@@ -76,24 +76,15 @@ private:
             iss >> recipient_email;
             std::getline(iss, message);
 
-            std::cout << "Sender email: " << sender_email_ << " (" << getPort() << ")\n";
-            std::cout << "Recipient email: " << recipient_email << " (порт неизвестен до аутентификации)\n"; // Показать порт получателя если он есть.
-
-            // Проверить, есть ли порт получателя в карте.
-            auto it = clientPorts_.find(recipient_email);
-            if (it != clientPorts_.end()) {
-                std::cout << "Recipient port: " << it->second << std::endl;
-            }
-
             save_message(sender_email_, recipient_email, message);
             send_response("MESSAGE_SENT\n");
         }
         else {
             send_response("INVALID_COMMAND\n");
         }
+
         do_read();
     }
-
 
     bool authenticate_user(const std::string& email, const std::string& password) {
         std::ifstream users_file("users.txt");
@@ -112,14 +103,9 @@ private:
     }
 
     void save_message(const std::string& sender_email, const std::string& recipient_email, const std::string& message) {
-        if (sender_email.empty()) {
-            std::cerr << "Error: sender_email is empty!\n";
-            return;
-        }
-
         std::ofstream out_file(recipient_email + ".txt", std::ios::app);
         if (out_file.is_open()) {
-            out_file << "From: " << sender_email << "\n";  // Сохраняем email отправителя
+            out_file << "From: " << sender_email << "\n";
             out_file << "Message: " << message << "\n";
             out_file << "-----------------------------------\n";
             std::cout << "Message saved for recipient: " << recipient_email << "\n";
@@ -142,17 +128,17 @@ private:
 
     tcp::socket socket_;
     char data_[max_length];
-    std::string sender_email_; // Сохраняем email отправителя
+    std::string sender_email_;
     std::map<std::string, unsigned short>& clientPorts_;
 };
 
-// Класс сервера
 class Server {
 public:
     Server(boost::asio::io_service& io_service, short port)
         : acceptor_(io_service, tcp::endpoint(tcp::v4(), port)), clientPorts_() {
         start_accept();
     }
+
 private:
     void start_accept() {
         auto new_session = std::make_shared<Session>(tcp::socket(acceptor_.get_executor()), clientPorts_);
@@ -168,10 +154,10 @@ private:
                 start_accept();
             });
     }
+
     tcp::acceptor acceptor_;
     std::map<std::string, unsigned short> clientPorts_;
 };
-
 
 int main() {
     setlocale(0, "");
